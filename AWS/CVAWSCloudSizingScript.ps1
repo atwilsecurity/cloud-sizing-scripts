@@ -1063,6 +1063,24 @@ function Process-EKSCluster {
         return $null
     }
 
+    # AB-2 / AB-9 remediation: validate every value that flows into either the
+    # `aws` CLI argv or the kubeconfig file path against AWS naming rules.
+    # `& aws @awsArgs` already passes argv as a list (no shell parsing), but a
+    # cluster name like '../../../tmp/x' would still poison the kubeconfig path
+    # and the AWS CLI's own logs.
+    if ($clusterName -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$') {
+        Write-ScriptOutput "EKS: Refusing untrusted cluster name '${clusterName}'" -Level Warning
+        return $null
+    }
+    if ($Region -and $Region -notmatch '^[a-z]{2}-[a-z]+-\d{1,2}$') {
+        Write-ScriptOutput "EKS: Refusing untrusted region '${Region}'" -Level Warning
+        return $null
+    }
+    if ($RoleArn -and $RoleArn -notmatch '^arn:aws[a-z-]*:iam::\d{12}:role/[\w+=,.@/-]{1,128}$') {
+        Write-ScriptOutput "EKS: Refusing untrusted RoleArn '${RoleArn}'" -Level Warning
+        return $null
+    }
+
     $kubernetesVersion = "Unknown"
     try {
         $clusterInfo = Get-EKSCluster -Name $clusterName -Credential $Credential -Region $Region -ErrorAction Stop
@@ -1071,7 +1089,10 @@ function Process-EKSCluster {
         Write-ScriptOutput "EKS: Failed to get cluster details for ${clusterName}: $_" -Level Warning
     }
 
-    $tmpKube = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kubeconfig_${clusterName}_${([guid]::NewGuid())}.yaml")
+    # AB-9 remediation: use a random temp filename (GetTempFileName) so the
+    # path never embeds the user-controlled cluster name. The 0-byte placeholder
+    # GetTempFileName creates is overwritten by `aws eks update-kubeconfig`.
+    $tmpKube = [System.IO.Path]::GetTempFileName()
 
     Ensure-Kubectl
 

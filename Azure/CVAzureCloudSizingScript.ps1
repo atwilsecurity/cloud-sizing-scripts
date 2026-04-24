@@ -322,7 +322,7 @@ function Get-AKSPersistentVolumeInfo {
         [Parameter(Mandatory=$true)]
         [string]$SubscriptionId
     )
-    
+
     $pvInfo = @{
         PersistentVolumes = @()
         PersistentVolumeClaims = @()
@@ -331,7 +331,28 @@ function Get-AKSPersistentVolumeInfo {
         TotalPVCCount = 0
         AccessError = $null
     }
-    
+
+    # AB-3 remediation: validate subscription / resource group / cluster name against
+    # Azure's documented naming rules before passing them to Import-AzAksCredential
+    # or any downstream `az`/kubectl call. Even though Import-AzAksCredential is a
+    # typed cmdlet, these values flow into kubeconfig context names and the log
+    # stream, so we want to refuse anything that isn't a well-formed identifier.
+    if ($SubscriptionId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        $pvInfo.AccessError = "Refusing untrusted Azure SubscriptionId: $SubscriptionId"
+        Write-Warning $pvInfo.AccessError
+        return $pvInfo
+    }
+    if ($ResourceGroupName -notmatch '^[A-Za-z0-9._()-]{1,90}$') {
+        $pvInfo.AccessError = "Refusing untrusted Azure ResourceGroupName: $ResourceGroupName"
+        Write-Warning $pvInfo.AccessError
+        return $pvInfo
+    }
+    if ($ClusterName -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,62}[A-Za-z0-9]$' -and $ClusterName -notmatch '^[A-Za-z0-9]$') {
+        $pvInfo.AccessError = "Refusing untrusted AKS ClusterName: $ClusterName"
+        Write-Warning $pvInfo.AccessError
+        return $pvInfo
+    }
+
     try {
         # Get AKS cluster credentials using PowerShell cmdlet
         Write-Verbose "Getting credentials for AKS cluster $ClusterName"

@@ -6,6 +6,7 @@ import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 import os
+import re
 from datetime import datetime
 import logging
 import tempfile
@@ -14,6 +15,26 @@ import shutil
 
 oci_path = shutil.which("oci")
 kubectl_path = shutil.which("kubectl")
+
+# --- Security: input validation helpers (Agent Bounty AB-1 / AB-4 remediation) ---
+# OCI cluster OCIDs follow a well-defined format: ocid1.<resource>.<realm>.<region>.<unique>
+# Anything outside [A-Za-z0-9._-] in an OCID is suspicious and must be rejected.
+_OCID_RE = re.compile(r"^ocid1\.[a-z0-9_]+\.[a-z0-9_-]*\.[a-z0-9_-]*\.[A-Za-z0-9._-]+$")
+# OCI region names are lowercase letters, digits and hyphens (e.g. us-ashburn-1, ap-tokyo-1).
+_REGION_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+
+
+def _validate_ocid(value, label="ocid"):
+    if not isinstance(value, str) or not _OCID_RE.match(value):
+        raise ValueError(f"Refusing to use untrusted {label}: {value!r}")
+    return value
+
+
+def _validate_region(value):
+    if not isinstance(value, str) or not _REGION_RE.match(value):
+        raise ValueError(f"Refusing to use untrusted region: {value!r}")
+    return value
+# --- end security helpers ---
 
 total_instances = 0
 total_instance_sizeGB = 0
@@ -656,21 +677,38 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                 cluster_info.cluster_name = cluster.name
                 cluster_info.kubernetes_version = cluster.kubernetes_version
 
-                kubeconfig_file = os.path.join(tempfile.gettempdir(), f"kubeconfig_{cluster.id}")
+                # AB-1 / AB-4 / AB-7 remediation:
+                #   1. Validate cluster.id and region against strict allowlists before passing
+                #      to any subprocess call (defense in depth — argv is already passed as a
+                #      list, but a malicious value could still poison the kubeconfig path
+                #      and any downstream tool that reads it).
+                #   2. Allocate the kubeconfig path with tempfile.mkstemp so the filename is
+                #      unpredictable and the file is created with mode 0600. Avoids the
+                #      symlink/race window of the prior os.path.join pattern.
+                try:
+                    safe_cluster_id = _validate_ocid(cluster.id, label="cluster.id")
+                    safe_region = _validate_region(region)
+                except ValueError as ve:
+                    logging.error(f"Skipping cluster {cluster.name!r}: {ve}")
+                    continue
+
+                kube_fd, kubeconfig_file = tempfile.mkstemp(prefix="kubeconfig_", suffix=".yaml")
+                os.close(kube_fd)
                 try:
                     subprocess.run(
                         [
                             "oci", "ce", "cluster", "create-kubeconfig",
-                            "--cluster-id", cluster.id,
+                            "--cluster-id", safe_cluster_id,
                             "--file", kubeconfig_file,
-                            "--region", region,
+                            "--region", safe_region,
                             "--token-version", "2.0.0",
                             "--kube-endpoint", "PRIVATE_ENDPOINT",
                             "--profile", config.get("profile", oci.config.DEFAULT_PROFILE)
                         ],
                         check=True,
                         capture_output=True,
-                        text=True
+                        text=True,
+                        shell=False,
                     )
 
                     logging.info(f"Kubeconfig created at {kubeconfig_file} for cluster {cluster.name}")
@@ -679,7 +717,8 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                         ["kubectl", "--kubeconfig", kubeconfig_file, "get", "pvc", "-A", "-o", "json"],
                         check=True,
                         capture_output=True,
-                        text=True
+                        text=True,
+                        shell=False,
                     )
 
                     pvc_data = json.loads(result.stdout)
@@ -700,7 +739,8 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                             ["kubectl", "--kubeconfig", kubeconfig_file, "get", "nodes", "-o", "json"],
                             check=True,
                             capture_output=True,
-                            text=True
+                            text=True,
+                            shell=False,
                         )
                         node_data = json.loads(node_result.stdout)
                         cluster_info.node_names = [n["metadata"]["name"] for n in node_data["items"]]

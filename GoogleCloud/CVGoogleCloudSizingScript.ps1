@@ -208,12 +208,40 @@ if ($Types) {
 # -------------------------
 # Helpers
 # -------------------------
+
+# AB-5 remediation: every value that flows into a `& gcloud ... --project $proj`
+# invocation, a `& bq --project_id=$ProjectId ...` invocation, a kubeconfig file
+# path, or a log line MUST satisfy GCP's project-id naming rules:
+#   - 6-30 chars, lowercase letters, digits, hyphens
+#   - must start with a lowercase letter
+#   - cannot end with a hyphen
+# Anything else is rejected up front so a user-supplied -Projects value cannot
+# carry shell metacharacters or path-traversal sequences into downstream code.
+function Test-GcpProjectId {
+    param([string]$ProjectId)
+    return ($ProjectId -match '^[a-z][a-z0-9-]{4,28}[a-z0-9]$')
+}
+function Assert-GcpProjectId {
+    param([string]$ProjectId)
+    if (-not (Test-GcpProjectId -ProjectId $ProjectId)) {
+        throw "Refusing untrusted GCP project id: '$ProjectId' (must match GCP naming rules)."
+    }
+    return $ProjectId
+}
+
 function Get-GcpProjects {
     try {
     # Added --quiet to suppress any interactive prompt
     $json = gcloud --quiet projects list --format=json | ConvertFrom-Json
         if (-not $json) { throw "No projects returned by gcloud." }
-        return $json.projectId
+        # Filter through the strict allowlist; warn (don't fail) on rejections so
+        # a single bad row from `gcloud projects list` doesn't kill the whole run.
+        $clean = @()
+        foreach ($p in $json.projectId) {
+            if (Test-GcpProjectId -ProjectId $p) { $clean += $p }
+            else { Write-Warning "Get-GcpProjects: skipping malformed project id '$p'" }
+        }
+        return $clean
     } catch {
         Write-Error "Failed to list GCP projects. Ensure gcloud SDK is installed and authenticated. Error: $_"
         Stop-Transcript | Out-Null
@@ -2353,6 +2381,20 @@ $allProjects = Get-GcpProjects
 if ($Projects) {
     # Trim & dedupe input list
     $Projects = $Projects | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique
+    # AB-5 remediation: reject any -Projects entry that does not satisfy GCP
+    # project naming rules BEFORE comparing against the live project lookup.
+    # This guarantees nothing user-controlled with shell metacharacters can
+    # reach a `gcloud --project ...` argv slot or a log line.
+    $malformed = $Projects | Where-Object { -not (Test-GcpProjectId -ProjectId $_) }
+    if ($malformed) {
+        Write-Warning ("Ignoring malformed project id(s) (failed allowlist): {0}" -f ($malformed -join ', '))
+        $Projects = $Projects | Where-Object { Test-GcpProjectId -ProjectId $_ }
+    }
+    if (-not $Projects -or $Projects.Count -eq 0) {
+        Write-Error "No usable -Projects entries after allowlist filtering."
+        Stop-Transcript | Out-Null
+        exit 1
+    }
     # Build case-insensitive lookup of all accessible projects
     $allLookup = @{}
     foreach ($p in $allProjects) { $allLookup[$p.ToLower()] = $p }
