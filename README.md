@@ -27,7 +27,7 @@ scripts. The upstream repository is preserved as the `upstream` git remote.
 A pre-execution security review identified six High severity findings across
 these scripts; the patches below address all six.
 
-Maintainer: Wil Ramos &lt;gcp@onevm.io&gt;
+Maintainer: Wil Ramos;
 Review date: 2026-04-24
 
 ### `OCI/CVOracleCloudSizingScript.py` &mdash; 3 High
