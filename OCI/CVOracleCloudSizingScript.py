@@ -21,14 +21,20 @@ kubectl_path = shutil.which("kubectl")
 # Anything outside [A-Za-z0-9._-] in an OCID is suspicious and must be rejected.
 _OCID_RE = re.compile(r"^ocid1\.[a-z0-9_]+\.[a-z0-9_-]*\.[a-z0-9_-]*\.[A-Za-z0-9._-]+$")
 # OCI region names are lowercase letters, digits and hyphens (e.g. us-ashburn-1, ap-tokyo-1).
-_REGION_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+_OCID_RE = re.compile(r"^ocid1\.[a-z0-9_]{1,50}\.[a-z0-9_-]{0,50}\.[a-z0-9_-]{0,50}\.[A-Za-z0-9._-]{1,100}$")
 
+_REGION_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 
+# Additional validation: profile names should only contain safe characters
+_PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 def _validate_ocid(value, label="ocid"):
     if not isinstance(value, str) or not _OCID_RE.match(value):
         raise ValueError(f"Refusing to use untrusted {label}: {value!r}")
+    """Validate OCI OCID format with strict length limits to prevent injection."""
     return value
 
+    if len(value) > 255:  # Additional length check
+        raise ValueError(f"OCID too long for {label}: {len(value)} chars")
 
 def _validate_region(value):
     if not isinstance(value, str) or not _REGION_RE.match(value):
@@ -36,7 +42,17 @@ def _validate_region(value):
     return value
 # --- end security helpers ---
 
+
+def _validate_profile(value):
+    """Validate OCI profile name to prevent injection."""
+    if not isinstance(value, str) or not _PROFILE_RE.match(value):
+        raise ValueError(f"Refusing to use untrusted profile: {value!r}")
+    return value
+
+
+
 total_instances = 0
+
 total_instance_sizeGB = 0
 total_instance_sizeTB = 0
 total_namespaces = 0
@@ -680,6 +696,13 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                 # AB-1 / AB-4 / AB-7 remediation:
                 #   1. Validate cluster.id and region against strict allowlists before passing
                 #      to any subprocess call (defense in depth — argv is already passed as a
+                    # Additional security: validate profile name if present
+                    profile_name = config.get("profile", oci.config.DEFAULT_PROFILE)
+                    try:
+                        safe_profile = _validate_profile(profile_name)
+                    except ValueError as ve:
+                        logging.error(f"Invalid profile name {profile_name!r}: {ve}")
+                        safe_profile = oci.config.DEFAULT_PROFILE
                 #      list, but a malicious value could still poison the kubeconfig path
                 #      and any downstream tool that reads it).
                 #   2. Allocate the kubeconfig path with tempfile.mkstemp so the filename is
@@ -688,7 +711,7 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                 try:
                     safe_cluster_id = _validate_ocid(cluster.id, label="cluster.id")
                     safe_region = _validate_region(region)
-                except ValueError as ve:
+                            "--profile", safe_profile
                     logging.error(f"Skipping cluster {cluster.name!r}: {ve}")
                     continue
 
@@ -696,6 +719,11 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                 os.close(kube_fd)
                 try:
                     subprocess.run(
+                    # Verify kubeconfig file was created and has reasonable size
+                    if not os.path.exists(kubeconfig_file) or os.path.getsize(kubeconfig_file) == 0:
+                        logging.error(f"Kubeconfig creation failed for cluster {cluster.name}")
+                        continue
+
                         [
                             "oci", "ce", "cluster", "create-kubeconfig",
                             "--cluster-id", safe_cluster_id,
@@ -706,6 +734,11 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                             "--profile", config.get("profile", oci.config.DEFAULT_PROFILE)
                         ],
                         check=True,
+                    # Validate JSON output before parsing
+                    if not result.stdout.strip():
+                        logging.warning(f"Empty kubectl output for cluster {cluster.name}")
+                        continue
+
                         capture_output=True,
                         text=True,
                         shell=False,
@@ -730,6 +763,11 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                     cluster_info.total_pvc_size_gb = sum([
                         int(pvc["spec"]["resources"]["requests"]["storage"].replace("Gi", ""))
                         for pvc in pvc_data["items"]
+                        # Validate node data structure
+                        if not isinstance(node_data, dict) or "items" not in node_data:
+                            logging.warning(f"Invalid node data structure for cluster {cluster.name}")
+                            cluster_info.node_names = []
+                            cluster_info.node_count = 0
                         if "resources" in pvc["spec"] and "storage" in pvc["spec"]["resources"]["requests"]
                     ])
                     cluster_info.total_pvc_size_tb = round(cluster_info.total_pvc_size_gb / 1024, 2)
@@ -740,6 +778,8 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                             check=True,
                             capture_output=True,
                             text=True,
+                    # Secure cleanup: ensure kubeconfig is removed even if an exception occurred
+                    # Use try-except to handle potential race conditions
                             shell=False,
                         )
                         node_data = json.loads(node_result.stdout)
@@ -789,6 +829,12 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
 
 
 if __name__ == "__main__":
+            # Validate profile name from command line
+            try:
+                profile_name = _validate_profile(profile_name)
+            except ValueError as ve:
+                logging.error(f"Invalid profile name from command line: {ve}")
+                sys.exit(1)
 
     if not shutil.which("kubectl"):
         logging.error("Error: 'kubectl' command not found. Please install kubectl to proceed.")
