@@ -25,6 +25,10 @@ _REGION_RE = re.compile(r"^[a-z0-9-]{1,40}$")
 
 
 def _validate_ocid(value, label="ocid"):
+# OCI profile names should only contain alphanumeric characters, hyphens, underscores, and dots
+# This prevents shell metacharacters that could be used for command injection
+_PROFILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
     if not isinstance(value, str) or not _OCID_RE.match(value):
         raise ValueError(f"Refusing to use untrusted {label}: {value!r}")
     return value
@@ -37,6 +41,12 @@ def _validate_region(value):
 # --- end security helpers ---
 
 total_instances = 0
+
+def _validate_profile(value):
+    if not isinstance(value, str) or not _PROFILE_RE.match(value):
+        raise ValueError(f"Refusing to use untrusted profile name: {value!r}")
+    return value
+
 total_instance_sizeGB = 0
 total_instance_sizeTB = 0
 total_namespaces = 0
@@ -670,13 +680,35 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
             for cluster in clusters:
                 if cluster.lifecycle_state == "DELETED":
                     continue
-
+            raw_profile = arg.split("=", 1)[1]  # Use maxsplit=1 to handle values with '=' in them
+            try:
+                profile_name = _validate_profile(raw_profile)
+            except ValueError as e:
+                logging.error(f"Invalid profile name: {e}")
+                sys.exit(1)
                 cluster_info = OKEClusterInfo()
-                cluster_info.region = region
+            raw_regions = arg.split("=", 1)[1].split(",")
+            try:
+                regions = [_validate_region(r.strip()) for r in raw_regions if r.strip()]
+            except ValueError as e:
+                logging.error(f"Invalid region name: {e}")
+                sys.exit(1)
                 cluster_info.cluster_id = cluster.id
-                cluster_info.cluster_name = cluster.name
+            raw_compartments = arg.split("=", 1)[1].split(",")
+            try:
+                # Validate compartment IDs as OCIDs
+                compartments = [_validate_ocid(c.strip(), "compartment") for c in raw_compartments if c.strip()]
+            except ValueError as e:
+                logging.error(f"Invalid compartment ID: {e}")
+                sys.exit(1)
                 cluster_info.kubernetes_version = cluster.kubernetes_version
-
+            raw_workload = arg.split("=", 1)[1]
+            # Validate workload against allowed values
+            allowed_workloads = ["instances", "object_storage", "db_systems", "oke_clusters", "all"]
+            if raw_workload not in allowed_workloads:
+                logging.error(f"Invalid workload '{raw_workload}'. Allowed values: {', '.join(allowed_workloads)}")
+                sys.exit(1)
+            workload = raw_workload
                 # AB-1 / AB-4 / AB-7 remediation:
                 #   1. Validate cluster.id and region against strict allowlists before passing
                 #      to any subprocess call (defense in depth — argv is already passed as a
@@ -686,6 +718,13 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                 #      unpredictable and the file is created with mode 0600. Avoids the
                 #      symlink/race window of the prior os.path.join pattern.
                 try:
+    else:
+        # Validate the profile name even if it comes from DEFAULT_PROFILE
+        try:
+            profile_name = _validate_profile(profile_name)
+        except ValueError as e:
+            logging.error(f"Invalid default profile name: {e}")
+            sys.exit(1)
                     safe_cluster_id = _validate_ocid(cluster.id, label="cluster.id")
                     safe_region = _validate_region(region)
                 except ValueError as ve:
@@ -730,6 +769,14 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                     cluster_info.total_pvc_size_gb = sum([
                         int(pvc["spec"]["resources"]["requests"]["storage"].replace("Gi", ""))
                         for pvc in pvc_data["items"]
+                    # Validate the profile name from config before using it in subprocess
+                    safe_profile = config.get("profile", oci.config.DEFAULT_PROFILE)
+                    try:
+                        safe_profile = _validate_profile(safe_profile)
+                    except ValueError as e:
+                        logging.error(f"Invalid profile in config: {e}")
+                        continue
+
                         if "resources" in pvc["spec"] and "storage" in pvc["spec"]["resources"]["requests"]
                     ])
                     cluster_info.total_pvc_size_tb = round(cluster_info.total_pvc_size_gb / 1024, 2)
@@ -738,7 +785,7 @@ def get_oke_cluster_info(config, filename, regions=[], compartments=[]):
                         node_result = subprocess.run(
                             ["kubectl", "--kubeconfig", kubeconfig_file, "get", "nodes", "-o", "json"],
                             check=True,
-                            capture_output=True,
+                            "--profile", safe_profile
                             text=True,
                             shell=False,
                         )
