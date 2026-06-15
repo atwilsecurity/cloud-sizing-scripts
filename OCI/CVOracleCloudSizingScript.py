@@ -28,6 +28,12 @@ def _validate_ocid(value, label="ocid"):
     if not isinstance(value, str) or not _OCID_RE.match(value):
         raise ValueError(f"Refusing to use untrusted {label}: {value!r}")
     return value
+def _validate_profile_name(value):
+    # OCI profile names should only contain alphanumeric characters, hyphens, underscores, and dots
+    # This prevents command injection through profile names
+    if not isinstance(value, str) or not re.match(r"^[A-Za-z0-9._-]{1,64}$", value):
+        raise ValueError(f"Invalid profile name: {value!r}. Profile names must contain only alphanumeric characters, dots, hyphens, and underscores, and be 1-64 characters long.")
+    return value
 
 
 def _validate_region(value):
@@ -871,3 +877,184 @@ if __name__ == "__main__":
     else:
         logging.error(f"Unsupported workload specified: {workload}. Supported workloads are: instances, object_storage, db_systems, oke_clusters. If you want to gather information for all workloads, use --workload=all or don't specify the --workload argument at all.")
         sys.exit(1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    args = sys.argv[1:]
+    for arg in args:
+        if arg.startswith("--profile="):
+            profile_name = _validate_profile_name(arg.split("=")[1])
+        elif arg.startswith("--region="):
+            regions = arg.split("=")[1].split(",")
+        elif arg.startswith("--compartment="):
